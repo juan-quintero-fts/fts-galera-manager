@@ -118,17 +118,27 @@ def inspect_node(host: str):
         return row
     try:
         with Remote(host) as r:
-            _, state, _ = r.run('systemctl is-active mariadb 2>/dev/null || true')
-            row['mariadb'] = state or 'unknown'
-            if state != 'active':
-                return row
             sql = "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_cluster_status','wsrep_ready','wsrep_local_state_comment','wsrep_cluster_size','wsrep_connected','wsrep_local_index','wsrep_flow_control_paused','wsrep_local_recv_queue','wsrep_local_send_queue');"
-            code, out, err = r.run(mysql_command(sql))
-            if code != 0 or not out:
+            command = f'''if ! systemctl is-active --quiet mariadb; then
+  printf 'SERVICE|inactive\\n'
+  exit 0
+fi
+printf 'SERVICE|active\\n'
+{mysql_command(sql)}'''
+            code, out, err = r.run('bash -lc ' + shlex.quote(command))
+            lines = out.splitlines()
+            if not lines or not lines[0].startswith('SERVICE|'):
+                row['error'] = err or 'Respuesta de monitoreo remoto no válida'
+                return row
+            row['mariadb'] = lines[0].split('|', 1)[1] or 'unknown'
+            if row['mariadb'] != 'active':
+                return row
+            status_lines = lines[1:]
+            if code != 0 or not status_lines:
                 row['error'] = err or 'No fue posible consultar wsrep'
                 return row
             values = {}
-            for line in out.splitlines():
+            for line in status_lines:
                 parts = line.split(None, 1)
                 if len(parts) == 2:
                     values[parts[0]] = parts[1]

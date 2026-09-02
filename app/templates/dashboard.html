@@ -51,7 +51,13 @@
 <article class="card node-card" data-host="{{ n.host }}">
   <div class="card-head">
     <h2>{{ n.host }}</h2>
-    <span class="dot {{ 'ok' if n.ssh else 'bad' }}" data-field="dot"></span>
+    {% set dot_state = 'bad' if not n.ssh else ('ok' if n.mariadb == 'active' else 'degraded') %}
+    {% set dot_label = 'Sin conexión SSH' if not n.ssh else ('SSH y MariaDB activos' if n.mariadb == 'active' else 'SSH activo, MariaDB inactivo') %}
+    {% set status_label = 'Nodo desconectado' if not n.ssh else ('Operativo' if n.mariadb == 'active' else 'MariaDB caído') %}
+    <span class="node-status {{ dot_state }}" data-field="node-status">
+      <span class="dot {{ dot_state }}" data-field="dot" title="{{ dot_label }}" aria-label="{{ dot_label }}"></span>
+      <span data-field="status-label">{{ status_label }}</span>
+    </span>
   </div>
   <dl>
     <dt>Interfaz / SSH</dt><dd data-field="ssh">{{ 'Activa' if n.ssh else 'Inactiva' }}</dd>
@@ -234,7 +240,21 @@ async function refreshStatus() {
       setText(card, 'flow_control_paused', node.flow_control_paused);
       setText(card, 'queues', `${node.recv_queue} / ${node.send_queue}`);
       const dot = card.querySelector('[data-field="dot"]');
-      if (dot) dot.className = `dot ${node.ssh ? 'ok' : 'bad'}`;
+      if (dot) {
+        const dotState = !node.ssh ? 'bad' : (node.mariadb === 'active' ? 'ok' : 'degraded');
+        const dotLabel = !node.ssh
+          ? 'Sin conexión SSH'
+          : (node.mariadb === 'active' ? 'SSH y MariaDB activos' : 'SSH activo, MariaDB inactivo');
+        const statusLabel = !node.ssh
+          ? 'Nodo desconectado'
+          : (node.mariadb === 'active' ? 'Operativo' : 'MariaDB caído');
+        dot.className = `dot ${dotState}`;
+        dot.title = dotLabel;
+        dot.setAttribute('aria-label', dotLabel);
+        const nodeStatus = card.querySelector('[data-field="node-status"]');
+        if (nodeStatus) nodeStatus.className = `node-status ${dotState}`;
+        setText(card, 'status-label', statusLabel);
+      }
       const error = card.querySelector('[data-field="error"]');
       if (error) {
         error.textContent = node.error || '';
