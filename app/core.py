@@ -33,9 +33,10 @@ class SSHError(RuntimeError):
 class Remote:
     """Conexión SSH.
 
-    Por defecto usa el usuario operativo (ftsuser) y su llave. Para una operación
-    privilegiada se pasa user='root' y password=<contraseña ingresada en el formulario>.
-    La contraseña vive únicamente durante esa petición.
+    Por defecto usa el usuario operativo (ftsuser) con la contraseña configurada
+    o, si está vacía, con su llave. Para una operación privilegiada se pasa
+    user='root' y password=<contraseña ingresada en el formulario>. Esa contraseña
+    vive únicamente durante la petición.
     """
     def __init__(self, host: str, user: Optional[str] = None, password: Optional[str] = None, use_key: bool = True):
         self.host = host
@@ -60,10 +61,11 @@ class Remote:
         if self.password is not None:
             # Conexión privilegiada: autenticación por contraseña escrita por el usuario.
             kwargs['password'] = self.password
-        elif self.use_key and os.path.exists(settings.ssh_key_path):
-            kwargs['key_filename'] = settings.ssh_key_path
         elif settings.ssh_password:
+            # Monitoreo: una contraseña configurada tiene prioridad sobre la llave.
             kwargs['password'] = settings.ssh_password
+        elif self.use_key and os.path.isfile(settings.ssh_key_path):
+            kwargs['key_filename'] = settings.ssh_key_path
         try:
             c.connect(**kwargs)
         except Exception as e:
@@ -103,7 +105,7 @@ def mysql_command(sql: str) -> str:
 
 
 def inspect_node(host: str):
-    """Monitoreo de solo lectura usando ftsuser + llave SSH."""
+    """Monitoreo de solo lectura usando las credenciales SSH configuradas."""
     row = {
         'host': host, 'ssh': False, 'mariadb': 'unknown', 'cluster': 'N/A', 'ready': 'N/A',
         'local_state': 'N/A', 'size': 'N/A', 'connected': 'N/A', 'wsrep_local_index': 'N/A',

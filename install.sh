@@ -48,11 +48,17 @@ fi
 mkdir -p data secrets docs
 chmod 700 secrets
 
-if [[ ! -f .env ]]; then
-  cp .env.example .env
-  say "Creado .env desde .env.example"
-else
+prepare_env(){
+  if [[ ! -f .env ]]; then
+    cp .env.example .env
+    say "Creado .env como copia de .env.example."
+  fi
+}
+
+if [[ -f .env ]]; then
   say ".env ya existe; no se sobrescribe."
+else
+  say ".env se creara desde .env.example antes de editarlo."
 fi
 
 if [[ -f secrets/id_rsa ]]; then
@@ -74,6 +80,7 @@ else
 fi
 
 if ask_yn "Desea editar .env ahora?"; then
+  prepare_env
   editor="vim"
   if ! command -v "$editor" >/dev/null 2>&1; then
     say "ERROR: vim no esta instalado. Instala vim o edita .env manualmente."
@@ -82,17 +89,19 @@ if ask_yn "Desea editar .env ahora?"; then
   "$editor" .env
 fi
 
+# El contenedor siempre necesita .env, incluso si el usuario decide no editarlo.
+prepare_env
+
 if [[ ! -f secrets/id_rsa ]]; then
-  say "ERROR: secrets/id_rsa no existe."
-  say "La aplicacion necesita la llave privada de ftsuser para el monitoreo SSH."
-  exit 1
+  say "No se configuro una llave SSH. Verifique que SSH_PASSWORD tenga valor en .env."
+else
+  chmod 600 secrets/id_rsa
 fi
-chmod 600 secrets/id_rsa
 
 say ""
 say "Motor seleccionado: $engine"
 say "IMPORTANTE:"
-say "- Monitoreo: ftsuser + llave SSH."
+say "- Monitoreo: ftsuser + SSH_PASSWORD; si esta vacio, usa la llave SSH."
 say "- Acciones privilegiadas: root + contrasena solicitada en cada operacion."
 say "- La contrasena root no se almacena."
 say "- Ninguna accion correctiva se ejecuta automaticamente."
@@ -127,14 +136,19 @@ else
   podman build --pull=true -t "$IMAGE_NAME" .
 
   say "Iniciando contenedor con Podman..."
+  podman_volumes=(
+    -v "${ROOT_DIR}/data:/app/data:Z"
+    -v "${ROOT_DIR}/docs:/app/docs:ro,Z"
+  )
+  if [[ -f "${ROOT_DIR}/secrets/id_rsa" ]]; then
+    podman_volumes+=(-v "${ROOT_DIR}/secrets/id_rsa:/run/secrets/ssh_key:ro,Z")
+  fi
   podman run -d \
     --name "$APP_NAME" \
     --restart=always \
     -p "${APP_PORT}:8080" \
     --env-file .env \
-    -v "${ROOT_DIR}/data:/app/data:Z" \
-    -v "${ROOT_DIR}/docs:/app/docs:ro,Z" \
-    -v "${ROOT_DIR}/secrets/id_rsa:/run/secrets/ssh_key:ro,Z" \
+    "${podman_volumes[@]}" \
     "$IMAGE_NAME"
 
   podman ps --filter "name=$APP_NAME" || true

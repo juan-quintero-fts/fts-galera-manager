@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block content %}
 <section class="policy-banner">
-  <strong>Control manual:</strong> el monitoreo usa <code>{{ ssh_user }}</code> + llave SSH. Ninguna acción correctiva es automática. Cada operación administrativa solicita nuevamente la contraseña de <code>{{ root_ssh_user }}</code>.
+  <strong>Control manual:</strong> el monitoreo usa las credenciales SSH configuradas para <code>{{ ssh_user }}</code>. Ninguna acción correctiva es automática. Cada operación administrativa solicita nuevamente la contraseña de <code>{{ root_ssh_user }}</code>.
 </section>
 
 {% if feedback %}

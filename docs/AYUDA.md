@@ -8,10 +8,17 @@ La aplicación nunca inicia, detiene, reinicia ni recupera nodos automáticament
 
 ## Credenciales y control
 
-- **Monitoreo:** `ftsuser` mediante llave SSH.
+- **Monitoreo:** `ftsuser` mediante `SSH_PASSWORD` o llave SSH. Cuando `SSH_PASSWORD` tiene valor, la contraseña tiene prioridad; si se deja vacío, se usa `SSH_KEY_PATH`.
 - **Consultas MariaDB/Galera:** se ejecutan remotamente por la sesión SSH utilizando `MYSQL_USER` y `MYSQL_PASSWORD` definidos en `.env`.
 - **Acciones administrativas:** conexión SSH independiente como `root`.
 - La contraseña de `root` se solicita **en cada operación** y no se almacena en `.env`, SQLite, auditoría ni sesión.
+
+Para autenticar el monitoreo por contraseña, configura y reinicia el contenedor:
+
+```dotenv
+SSH_USER=ftsuser
+SSH_PASSWORD="tu-contraseña-ssh"
+```
 
 ## Dashboard integrado
 
