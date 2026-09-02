@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="fts-galera-manager"
+IMAGE_NAME="fts-galera-manager:latest"
+APP_PORT="6060"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT_DIR"
+
+say(){ printf '%s\n' "$*"; }
+ask_yn(){
+  local p="$1" a
+  while true; do
+    read -r -p "$p (y/n): " a
+    case "${a:-}" in y|Y) return 0;; n|N) return 1;; *) say "Opcion invalida.";; esac
+  done
+}
+
+say "==============================================="
+say "       INSTALADOR FTS GALERA MANAGER"
+say "==============================================="
+say ""
+
+has_docker=0; has_podman=0
+command -v docker >/dev/null 2>&1 && has_docker=1
+command -v podman >/dev/null 2>&1 && has_podman=1
+
+if (( has_docker == 0 && has_podman == 0 )); then
+  say "ERROR: No se encontro Docker ni Podman instalado."
+  exit 1
+fi
+
+if (( has_docker == 1 && has_podman == 1 )); then
+  say "1) Docker + Docker Compose"
+  say "2) Podman puro"
+  while true; do
+    read -r -p "Seleccione motor [1/2]: " opt
+    case "$opt" in 1) engine=docker; break;; 2) engine=podman; break;; *) say "Opcion invalida.";; esac
+  done
+elif (( has_docker == 1 )); then
+  engine=docker
+  say "Docker detectado."
+else
+  engine=podman
+  say "Podman detectado."
+fi
+
+mkdir -p data secrets docs
+chmod 700 secrets
+
+if [[ ! -f .env ]]; then
+  cp .env.example .env
+  say "Creado .env desde .env.example"
+else
+  say ".env ya existe; no se sobrescribe."
+fi
+
+if [[ -f secrets/id_rsa ]]; then
+  say "Ya existe secrets/id_rsa."
+  if ask_yn "Desea reemplazar la llave SSH privada de ftsuser?"; then
+    read -r -p "Ruta de la llave SSH privada de ftsuser: " key_path
+    [[ -f "$key_path" ]] || { say "ERROR: No existe $key_path"; exit 1; }
+    cp "$key_path" secrets/id_rsa
+    chmod 600 secrets/id_rsa
+  fi
+else
+  if ask_yn "Desea copiar ahora la llave SSH privada de ftsuser?"; then
+    read -r -p "Ruta de la llave SSH privada de ftsuser: " key_path
+    [[ -f "$key_path" ]] || { say "ERROR: No existe $key_path"; exit 1; }
+    cp "$key_path" secrets/id_rsa
+    chmod 600 secrets/id_rsa
+    say "Llave copiada a secrets/id_rsa"
+  fi
+fi
+
+if ask_yn "Desea editar .env ahora?"; then
+  editor="vim"
+  if ! command -v "$editor" >/dev/null 2>&1; then
+    say "ERROR: vim no esta instalado. Instala vim o edita .env manualmente."
+    exit 1
+  fi
+  "$editor" .env
+fi
+
+if [[ ! -f secrets/id_rsa ]]; then
+  say "ERROR: secrets/id_rsa no existe."
+  say "La aplicacion necesita la llave privada de ftsuser para el monitoreo SSH."
+  exit 1
+fi
+chmod 600 secrets/id_rsa
+
+say ""
+say "Motor seleccionado: $engine"
+say "IMPORTANTE:"
+say "- Monitoreo: ftsuser + llave SSH."
+say "- Acciones privilegiadas: root + contrasena solicitada en cada operacion."
+say "- La contrasena root no se almacena."
+say "- Ninguna accion correctiva se ejecuta automaticamente."
+say "- La imagen NO usa apt-get ni instala mariadb-client/openssh-client/ping."
+say ""
+
+if ! ask_yn "Desea construir e iniciar FTS Galera Manager ahora?"; then
+  say "Instalacion preparada. El contenedor no fue iniciado."
+  exit 0
+fi
+
+if [[ "$engine" == "docker" ]]; then
+  if ! docker compose version >/dev/null 2>&1; then
+    say "ERROR: Docker Compose no esta disponible."
+    exit 1
+  fi
+  docker compose up -d --build
+  docker compose ps || true
+else
+  if podman container exists "$APP_NAME" >/dev/null 2>&1; then
+    say "Ya existe el contenedor $APP_NAME."
+    if ask_yn "Desea reemplazarlo?"; then
+      podman stop "$APP_NAME" >/dev/null 2>&1 || true
+      podman rm "$APP_NAME" >/dev/null 2>&1 || true
+    else
+      say "Cancelado para no modificar el contenedor existente."
+      exit 0
+    fi
+  fi
+
+  say "Construyendo imagen con Podman..."
+  podman build --pull=true -t "$IMAGE_NAME" .
+
+  say "Iniciando contenedor con Podman..."
+  podman run -d \
+    --name "$APP_NAME" \
+    --restart=always \
+    -p "${APP_PORT}:8080" \
+    --env-file .env \
+    -v "${ROOT_DIR}/data:/app/data:Z" \
+    -v "${ROOT_DIR}/docs:/app/docs:ro,Z" \
+    -v "${ROOT_DIR}/secrets/id_rsa:/run/secrets/ssh_key:ro,Z" \
+    "$IMAGE_NAME"
+
+  podman ps --filter "name=$APP_NAME" || true
+fi
+
+server_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
+say ""
+say "==============================================="
+say "       INSTALACION FINALIZADA"
+say "==============================================="
+if [[ -n "${server_ip:-}" ]]; then
+  say "Aplicacion: http://${server_ip}:${APP_PORT}"
+else
+  say "Aplicacion: http://IP_DEL_SERVIDOR:${APP_PORT}"
+fi
+say ""
+if [[ "$engine" == "podman" ]]; then
+  say "Comandos utiles:"
+  say "  podman ps"
+  say "  podman logs -f $APP_NAME"
+  say "  podman restart $APP_NAME"
+  say "  podman stop $APP_NAME"
+  say "  podman start $APP_NAME"
+fi

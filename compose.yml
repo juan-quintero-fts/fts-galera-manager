@@ -1,0 +1,13 @@
+services:
+  galera-manager:
+    build: .
+    container_name: fts-galera-manager
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "6060:8080"
+    volumes:
+      - ./docs:/app/docs:ro
+      - ./data:/app/data
+      - ${SSH_KEY_HOST_PATH:-./secrets/id_rsa}:/run/secrets/ssh_key:ro

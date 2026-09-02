@@ -1,0 +1,28 @@
+{% extends 'base.html' %}{% block content %}
+<section class="policy-banner"><strong>Recuperación 100 % manual:</strong> entrar a esta pantalla no ejecuta <code>wsrep-recover</code>, no modifica <code>grastate.dat</code> y no realiza bootstrap.</section>
+<h1>Asistente de recuperación</h1>
+<p class="lead">El diagnóstico sólo se ejecuta al presionar el botón. Después se muestran UUID/SEQNO para que el operador decida qué hacer.</p>
+<section class="notice {{ level }}"><strong>{{ summary }}</strong></section>
+<form method="post" action="/recovery/analyze" onsubmit="return confirm('¿Desea ejecutar manualmente wsrep-recover en los nodos detenidos usando root?');">
+  <label>Contraseña root <input type="password" name="root_password" placeholder="Se usa sólo para esta operación" autocomplete="current-password" required></label>
+  <button>Ejecutar diagnóstico manual</button>
+</form>
+{% if positions is not none %}
+{% if uuid_warning %}<div class="warning"><strong>Advertencia:</strong> se detectaron UUID diferentes. No seleccione automáticamente el SEQNO mayor sin revisar el historial del clúster.</div>{% endif %}
+<table><thead><tr><th>Nodo</th><th>Hostname</th><th>UUID</th><th>SEQNO</th><th>Origen</th><th>Acción manual</th></tr></thead><tbody>
+{% for p in positions %}
+<tr class="{{ 'recommended' if best is not none and p.seqno|string == best|string else '' }}">
+<td>{{ p.host }}</td><td>{{ p.hostname }}</td><td><code>{{ p.uuid }}</code></td>
+<td>{{ p.seqno }}{% if best is not none and p.seqno|string == best|string %} <strong>★ mayor</strong>{% endif %}</td>
+<td>{{ p.source }}</td>
+<td><details><summary>Preparar bootstrap manual</summary>
+<form method="post" action="/recovery/bootstrap/{{ p.host }}" onsubmit="return confirm('ATENCIÓN: se modificará safe_to_bootstrap y se ejecutará galera_new_cluster en {{ p.host }}. ¿Confirma continuar?');">
+<p>Revise UUID, SEQNO y disponibilidad de todos los nodos. Esta acción crea backup de <code>grastate.dat</code>, cambia <code>safe_to_bootstrap</code> y ejecuta <code>galera_new_cluster</code>.</p>
+<input name="confirm" placeholder="Escriba RECUPERAR" autocomplete="off">
+<input type="password" name="root_password" placeholder="Contraseña root" autocomplete="current-password" required>
+<button class="danger">Ejecutar recuperación</button>
+</form></details></td>
+</tr>
+{% endfor %}
+</tbody></table>{% endif %}
+{% endblock %}
