@@ -388,6 +388,9 @@ document.addEventListener('submit', async event => {
   const previousDisabled = lockedControls.map(control => control.disabled);
   const button = form.querySelector('button[type="submit"], button:not([type])');
   const originalText = button?.textContent;
+  const formData = new FormData(form);
+  const requestBody = new URLSearchParams();
+  for (const [name, value] of formData.entries()) requestBody.append(name, String(value));
   let requestFailed = false;
   if (nodeStart) {
     markNodeStarting(form);
@@ -402,7 +405,8 @@ document.addEventListener('submit', async event => {
     const actionUrl = new URL(form.getAttribute('action'), window.location.href);
     const response = await fetch(actionUrl, {
       method: form.method || 'POST',
-      body: new FormData(form),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+      body: requestBody,
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(await responseError(response));
