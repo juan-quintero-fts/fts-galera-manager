@@ -20,6 +20,36 @@ SSH_USER=ftsuser
 SSH_PASSWORD="tu-contraseña-ssh"
 ```
 
+La contraseña SSH y la contraseña de MariaDB son credenciales diferentes. Por ejemplo:
+
+```dotenv
+SSH_USER=root
+SSH_PASSWORD="contraseña-del-servidor"
+MYSQL_USER=root
+MYSQL_PASSWORD="contraseña-de-mariadb"
+```
+
+Si aparece `ERROR 1045 (28000): Access denied`, la conexión SSH ya funcionó y el rechazo proviene de MariaDB. Verifica `MYSQL_USER` y `MYSQL_PASSWORD`. Si el usuario `root` de MariaDB utiliza autenticación por socket local, puede requerir `MYSQL_PASSWORD=` vacío.
+
+## Monitoreo periódico
+
+El navegador controla las consultas periódicas mientras el Dashboard está abierto. Con esta configuración se consulta cada 10 segundos:
+
+```dotenv
+AUTO_MONITOR=true
+MONITOR_INTERVAL=10
+```
+
+El intervalo mínimo admitido es de 5 segundos. Cada navegador abierto genera sus propias consultas y los nodos se inspeccionan uno por uno. Una nueva consulta no se inicia si la anterior todavía está en curso.
+
+Para cada nodo se comprueba:
+
+1. Accesibilidad del puerto SSH.
+2. Estado de `systemctl is-active mariadb`.
+3. Estado Galera mediante las variables `wsrep_*`, cuando MariaDB está activo.
+
+Las respuestas actualizan solamente el resumen, las tarjetas, sus controles y el panel de recuperación. Las acciones del Dashboard tampoco recargan la página completa.
+
 ## Dashboard integrado
 
 La recuperación ya no está separada del Dashboard. El mismo Dashboard determina cuál de los siguientes escenarios está presente.
@@ -36,8 +66,8 @@ flowchart TD
     G -- Sí --> H[Mostrar botón para incorporar\ncada nodo manualmente]
     H --> I[Confirmación del operador]
     I --> J[Solicitar contraseña root]
-    J --> K[systemctl start mariadb]
-    K --> L[Validar MariaDB / Primary / Ready /\nConnected / Synced / Cluster Size]
+    J --> K[systemctl --no-block start mariadb]
+    K --> L[Monitorear MariaDB / Primary / Ready /\nConnected / Synced / Cluster Size]
     L --> H
     G -- No --> M[Clúster completo]
 
@@ -69,7 +99,9 @@ Si uno de los nodos tiene:
 
 la aplicación permite incorporar los nodos accesibles que tengan MariaDB detenido.
 
-Cada nodo se incorpora **uno por uno**. Antes de ejecutar `systemctl start mariadb` aparece una confirmación y se solicita nuevamente la contraseña de root.
+Cada nodo se incorpora **uno por uno**. Antes de ejecutar `systemctl --no-block start mariadb.service` aparece una confirmación y se solicita nuevamente la contraseña de root.
+
+El uso de `--no-block` es importante para bases grandes. systemd acepta la solicitud y libera inmediatamente la conexión web, mientras la transferencia IST o SST continúa en el servidor durante el tiempo necesario. Un SST de cientos de GB puede tardar varias horas y no queda limitado por el timeout de la petición SSH.
 
 Después de iniciar el servicio, la aplicación vuelve a consultar:
 
@@ -80,7 +112,16 @@ Después de iniciar el servicio, la aplicación vuelve a consultar:
 - `wsrep_local_state_comment`;
 - `wsrep_cluster_size`.
 
-La aplicación no interpreta un `systemctl start` exitoso como suficiente: muestra el estado Galera resultante.
+La aplicación no interpreta la aceptación del comando como una sincronización terminada. La tarjeta permanece en **Sincronizando** hasta confirmar simultáneamente:
+
+- MariaDB `active`;
+- `wsrep_local_state_comment = Synced`;
+- `wsrep_ready = ON`;
+- `wsrep_connected = ON`.
+
+También se reconoce como sincronización cuando systemd informa `activating` o `reloading`, cuando Galera informa `Joining` o `Donor/Desynced`, y cuando MariaDB responde temporalmente con `ERROR 1047: WSREP has not yet prepared node for application use`.
+
+Mientras el nodo está iniciando o sincronizando, su formulario de inicio queda bloqueado y el servidor rechaza intentos repetidos. Los flujos de diagnóstico y bootstrap tampoco consideran un nodo `activating` como detenido.
 
 ## Caso 2: interfaces activas y todos los MariaDB detenidos
 
@@ -117,6 +158,13 @@ Para establecer un nodo como Primary se requiere:
 7. Ejecuta `galera_new_cluster`.
 8. Valida el estado posterior.
 
+El backup queda en el mismo directorio configurado en `MYSQL_GRASTATE`, con fecha y hora agregadas al nombre. Por ejemplo:
+
+```text
+/var/lib/mysql/grastate.dat
+/var/lib/mysql/grastate.dat.bak.2026-09-03_135928
+```
+
 ## Después del bootstrap
 
 Cuando el nuevo Primary queda validado, la aplicación pregunta si se desean levantar los demás nodos.
@@ -131,7 +179,7 @@ Cada incorporación vuelve a solicitar contraseña root y vuelve a validar el es
 FTS Galera Manager no ejecuta acciones correctivas automáticamente. Las únicas acciones operativas expuestas en la interfaz son:
 
 ```text
-systemctl start mariadb        # incorporar un nodo faltante
+systemctl --no-block start mariadb.service # solicitar la incorporación
 wsrep-recover                  # diagnóstico manual
 galera_new_cluster             # recuperación manual
 modificación de grastate.dat   # sólo durante recuperación confirmada
@@ -142,4 +190,24 @@ No se exponen opciones para detener o reiniciar MariaDB desde el Dashboard. El �
 
 ## Colores
 
-El diseño general del Dashboard utiliza rojo como color institucional de la aplicación. Los indicadores verdes se reservan para estados saludables y los amarillos para advertencias operativas.
+El diseño general del Dashboard utiliza rojo como color institucional de la aplicación. Cada tarjeta muestra un punto y una leyenda:
+
+- **Verde - Operativo:** SSH disponible y Galera en `Synced`, `Ready=ON` y `Connected=ON`.
+- **Amarillo - Sincronizando:** MariaDB o Galera están iniciando, realizando IST/SST o todavía no alcanzan `Synced`.
+- **Amarillo - MariaDB caído:** SSH está disponible, pero el servicio está detenido o falló.
+- **Amarillo - Estado no disponible:** MariaDB está activo, pero no fue posible confirmar el estado Galera.
+- **Rojo - Nodo desconectado:** no existe conectividad con el puerto SSH.
+
+## Auditoría
+
+Las operaciones manuales guardan fecha, actor, nodo, acción, resultado y detalle en SQLite. Las secuencias ANSI de color producidas por comandos remotos se eliminan antes de guardar registros nuevos y también al mostrar registros antiguos. La contraseña de root no se incluye en la auditoría.
+
+## Aplicar cambios y resolver caché
+
+Después de actualizar la aplicación, reconstruye y recrea el contenedor:
+
+```bash
+docker compose up -d --build
+```
+
+Si el navegador continúa ejecutando una versión anterior del JavaScript, utiliza `Ctrl+F5`. Errores como `Not Found` o `There was an error parsing the body` después de una actualización pueden indicar que el navegador conserva recursos anteriores; revisa primero que el contenedor se haya reconstruido y fuerza la recarga de caché.
