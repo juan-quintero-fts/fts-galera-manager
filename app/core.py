@@ -110,7 +110,7 @@ def inspect_node(host: str):
         'host': host, 'ssh': False, 'mariadb': 'unknown', 'cluster': 'N/A', 'ready': 'N/A',
         'local_state': 'N/A', 'size': 'N/A', 'connected': 'N/A', 'wsrep_local_index': 'N/A',
         'flow_control_paused': 'N/A', 'recv_queue': 'N/A', 'send_queue': 'N/A', 'error': '',
-        'last_seen': time.strftime('%Y-%m-%d %H:%M:%S')
+        'syncing': False, 'last_seen': time.strftime('%Y-%m-%d %H:%M:%S')
     }
     row['ssh'] = tcp_reachable(host, settings.ssh_port)
     if not row['ssh']:
@@ -120,12 +120,18 @@ def inspect_node(host: str):
         with Remote(host) as r:
             _, state, _ = r.run('systemctl is-active mariadb 2>/dev/null || true')
             row['mariadb'] = state or 'unknown'
+            row['syncing'] = state in ('activating', 'reloading')
             if state != 'active':
                 return row
             sql = "SHOW GLOBAL STATUS WHERE Variable_name IN ('wsrep_cluster_status','wsrep_ready','wsrep_local_state_comment','wsrep_cluster_size','wsrep_connected','wsrep_local_index','wsrep_flow_control_paused','wsrep_local_recv_queue','wsrep_local_send_queue');"
             code, out, err = r.run(mysql_command(sql))
             if code != 0 or not out:
                 row['error'] = err or 'No fue posible consultar wsrep'
+                error_text = row['error'].lower()
+                row['syncing'] = (
+                    'wsrep has not yet prepared node for application use' in error_text
+                    or 'error 1047' in error_text
+                )
                 return row
             values = {}
             for line in out.splitlines():
@@ -143,6 +149,11 @@ def inspect_node(host: str):
                 'recv_queue': values.get('wsrep_local_recv_queue', 'N/A'),
                 'send_queue': values.get('wsrep_local_send_queue', 'N/A'),
             })
+            row['syncing'] = not (
+                row['local_state'] == 'Synced'
+                and row['ready'] in ('ON', '1')
+                and row['connected'] in ('ON', '1')
+            )
     except Exception as e:
         row['error'] = str(e)
     return row
@@ -151,10 +162,13 @@ def inspect_node(host: str):
 def classify(nodes):
     ssh_up = [n for n in nodes if n['ssh']]
     maria_up = [n for n in nodes if n['mariadb'] == 'active']
+    syncing = [n for n in nodes if n.get('syncing')]
     healthy = [n for n in nodes if n['cluster'] == 'Primary' and n['ready'] in ('ON','1') and n['connected'] in ('ON','1') and n['local_state'] == 'Synced']
     expected = settings.expected_cluster_size
     if len(healthy) == expected and all(str(n['size']) == str(expected) for n in healthy):
         return 'healthy', 'Clúster saludable'
+    if syncing:
+        return 'degraded', 'Sincronización de Galera en progreso'
     if maria_up and any(n['cluster'] == 'Primary' for n in maria_up):
         return 'degraded', 'Clúster operativo pero degradado'
     if maria_up:
@@ -202,7 +216,9 @@ def service_action(host: str, action: str, root_password: str):
     if action != 'start':
         raise ValueError('Sólo se permite iniciar/incorporar nodos')
     with root_remote(host, root_password) as r:
-        code, out, err = r.run(f'systemctl {action} mariadb.service', timeout=60)
+        # Galera puede tardar bastante durante SST/IST. Se encola el inicio y el
+        # dashboard sigue su progreso mediante el monitoreo de systemd y wsrep.
+        code, out, err = r.run('systemctl --no-block start mariadb.service', timeout=15)
         return code == 0, out or err
 
 

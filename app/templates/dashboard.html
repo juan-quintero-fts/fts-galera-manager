@@ -17,8 +17,8 @@
       </div>
     {% endif %}
   {% elif feedback.event == 'start' %}
-    <strong>{{ 'Nodo iniciado y estado validado.' if feedback.ok else 'Se ejecutó el inicio, pero el estado posterior no quedó correcto.' }}</strong>
-    <p>Nodo: <code>{{ feedback.host }}</code>. Revisa sus indicadores en la tarjeta correspondiente.</p>
+    <strong>{{ 'Solicitud de inicio enviada.' if feedback.ok else 'No fue posible solicitar el inicio del nodo.' }}</strong>
+    <p>Nodo: <code>{{ feedback.host }}</code>. El indicador permanecerá en <strong>Sincronizando</strong> hasta que Galera confirme el estado Synced.</p>
   {% endif %}
 </section>
 {% endif %}
@@ -48,12 +48,14 @@
 
 <div class="grid" id="node-grid">
 {% for n in nodes %}
-<article class="card node-card" data-host="{{ n.host }}">
+{% set operational = n.mariadb == 'active' and n.local_state == 'Synced' and n.ready in ('ON', '1') and n.connected in ('ON', '1') %}
+{% set syncing = n.syncing %}
+<article class="card node-card {{ 'syncing' if syncing else '' }}" data-host="{{ n.host }}">
   <div class="card-head">
     <h2>{{ n.host }}</h2>
-    {% set dot_state = 'bad' if not n.ssh else ('ok' if n.mariadb == 'active' else 'degraded') %}
-    {% set dot_label = 'Sin conexión SSH' if not n.ssh else ('SSH y MariaDB activos' if n.mariadb == 'active' else 'SSH activo, MariaDB inactivo') %}
-    {% set status_label = 'Nodo desconectado' if not n.ssh else ('Operativo' if n.mariadb == 'active' else 'MariaDB caído') %}
+    {% set dot_state = 'bad' if not n.ssh else ('ok' if operational else 'degraded') %}
+    {% set dot_label = 'Sin conexión SSH' if not n.ssh else ('SSH y Galera sincronizados' if operational else ('Galera se está sincronizando' if syncing else 'SSH activo, MariaDB no disponible')) %}
+    {% set status_label = 'Nodo desconectado' if not n.ssh else ('Operativo' if operational else ('Sincronizando' if syncing else ('MariaDB caído' if n.mariadb != 'active' else 'Estado no disponible'))) %}
     <span class="node-status {{ dot_state }}" data-field="node-status">
       <span class="dot {{ dot_state }}" data-field="dot" title="{{ dot_label }}" aria-label="{{ dot_label }}"></span>
       <span data-field="status-label">{{ status_label }}</span>
@@ -73,8 +75,8 @@
   <p class="error {% if not n.error %}hidden{% endif %}" data-field="error">{{ n.error }}</p>
 
   <div class="actions">
-    {% if can_join_nodes and n.ssh and n.mariadb != 'active' %}
-    <form method="post" action="/node/{{ n.host }}/service" class="start-node-form" onsubmit="return confirmStart('{{ n.host }}');">
+    {% if can_join_nodes and n.ssh and n.mariadb in ('inactive', 'failed') %}
+    <form method="post" action="/node/{{ n.host }}/service" class="start-node-form async-dashboard-form" onsubmit="return confirmStart('{{ n.host }}');">
       <input type="hidden" name="action" value="start">
       <input type="password" name="root_password" placeholder="Contraseña root" autocomplete="current-password" required>
       <button>Levantar / incorporar nodo</button>
@@ -113,7 +115,7 @@
     <div class="warning"><strong>Advertencia:</strong> sólo {{ ssh_up_count }} de {{ expected }} interfaces están accesibles. Puedes recuperar usando los nodos disponibles, incluso si sólo hay uno, pero no es posible comparar el estado con los nodos inaccesibles.</div>
     {% endif %}
 
-    <form method="post" action="/recovery/analyze" class="diagnostic-form" onsubmit="return confirm('¿Está seguro que desea ejecutar wsrep-recover en los nodos accesibles con MariaDB detenido?');">
+    <form method="post" action="/recovery/analyze" class="diagnostic-form async-dashboard-form" onsubmit="return confirm('¿Está seguro que desea ejecutar wsrep-recover en los nodos accesibles con MariaDB detenido?');">
       <label>Contraseña root
         <input type="password" name="root_password" placeholder="Se usa sólo para este diagnóstico" autocomplete="current-password" required>
       </label>
@@ -139,7 +141,7 @@
             <td>
               <details {% if is_best %}open{% endif %}>
                 <summary class="{{ 'recommended-summary' if is_best else '' }}">{{ 'Usar nodo recomendado como Primary' if is_best else 'Seleccionar este nodo como Primary' }}</summary>
-                <form method="post" action="/recovery/bootstrap/{{ p.host }}" onsubmit="return confirmBootstrap('{{ p.host }}', '{{ p.seqno }}', {{ 'true' if is_best else 'false' }});">
+                <form method="post" action="/recovery/bootstrap/{{ p.host }}" class="bootstrap-form async-dashboard-form" onsubmit="return confirmBootstrap('{{ p.host }}', '{{ p.seqno }}', {{ 'true' if is_best else 'false' }});">
                   <p>Se hará backup de <code>grastate.dat</code>, se establecerá <code>safe_to_bootstrap=1</code> y se ejecutará <code>galera_new_cluster</code> únicamente en este nodo.</p>
                   <input name="confirm" placeholder="Escriba RECUPERAR" autocomplete="off" required>
                   <input type="password" name="root_password" placeholder="Contraseña root" autocomplete="current-password" required>
@@ -154,7 +156,16 @@
     {% endif %}
   </div>
 
-  {% elif maria_up_count > 0 and primary_nodes|length == 0 %}
+  {% elif primary_nodes|length > 0 %}
+  <div class="scenario-box scenario-primary">
+    <h3>Primary activo</h3>
+    <p>No hay nodos accesibles pendientes de incorporación. El monitoreo continuará actualizando individualmente el estado de cada nodo.</p>
+    <div class="primary-list">
+      {% for p in primary_nodes %}<span class="status-chip">Primary: {{ p.host }} · {{ p.local_state }} · Size {{ p.size }}</span>{% endfor %}
+    </div>
+  </div>
+
+  {% elif maria_up_count > 0 %}
   <div class="scenario-box scenario-warning">
     <h3>MariaDB está activo, pero no se detectó Primary</h3>
     <p>La aplicación no ejecutará una recuperación automática. Revisa los indicadores. Este estado no corresponde al flujo seguro de incorporación normal y la aplicación no ejecutará acciones sobre el clúster hasta que el operador intervenga mediante el flujo de recuperación.</p>
@@ -174,13 +185,66 @@
 const monitorInterval = {{ monitor_interval|int }} * 1000;
 const autoMonitor = {{ 'true' if auto_monitor else 'false' }};
 let refreshInProgress = false;
-const initialMariaUpCount = {{ maria_up_count|int }};
-const initialSshUpCount = {{ ssh_up_count|int }};
-const initialHasPrimary = {{ 'true' if primary_nodes|length > 0 else 'false' }};
+let dashboardActionInProgress = false;
 
 function setText(card, field, value) {
   const el = card.querySelector(`[data-field="${field}"]`);
   if (el) el.textContent = value ?? 'N/A';
+}
+
+function nodeVisualState(node) {
+  if (!node.ssh) {
+    return {css: 'bad', label: 'Nodo desconectado', detail: 'Sin conexión SSH', syncing: false};
+  }
+  const operational = node.mariadb === 'active' &&
+    node.local_state === 'Synced' &&
+    ['ON', '1'].includes(String(node.ready)) &&
+    ['ON', '1'].includes(String(node.connected));
+  const syncing = Boolean(node.syncing) || ['activating', 'reloading'].includes(node.mariadb) ||
+    (node.mariadb === 'active' && node.local_state !== 'N/A' && !operational);
+  if (operational) {
+    return {css: 'ok', label: 'Operativo', detail: 'SSH y Galera sincronizados', syncing: false};
+  }
+  if (syncing) {
+    return {css: 'degraded', label: 'Sincronizando', detail: 'Galera se está sincronizando', syncing: true};
+  }
+  if (node.mariadb !== 'active') {
+    return {css: 'degraded', label: 'MariaDB caído', detail: 'SSH activo, MariaDB no disponible', syncing: false};
+  }
+  return {css: 'degraded', label: 'Estado no disponible', detail: 'No fue posible confirmar el estado Galera', syncing: false};
+}
+
+function applyNodeVisualState(card, node) {
+  const visual = nodeVisualState(node);
+  const dot = card.querySelector('[data-field="dot"]');
+  const nodeStatus = card.querySelector('[data-field="node-status"]');
+  if (dot) {
+    dot.className = `dot ${visual.css}`;
+    dot.title = visual.detail;
+    dot.setAttribute('aria-label', visual.detail);
+  }
+  if (nodeStatus) nodeStatus.className = `node-status ${visual.css}`;
+  setText(card, 'status-label', visual.label);
+  card.classList.toggle('syncing', visual.syncing);
+}
+
+function markNodeStarting(form) {
+  const card = form.closest('.node-card');
+  if (!card) return;
+  applyNodeVisualState(card, {
+    ssh: true,
+    mariadb: 'activating',
+    local_state: 'N/A',
+    ready: 'N/A',
+    connected: 'N/A',
+    syncing: true,
+  });
+  setText(card, 'mariadb', 'activating');
+  const error = card.querySelector('[data-field="error"]');
+  if (error) {
+    error.textContent = '';
+    error.classList.add('hidden');
+  }
 }
 
 function confirmStart(host) {
@@ -202,22 +266,170 @@ function dismissFeedback() {
   if (el) el.remove();
 }
 
+function structureSignatureFromData(data) {
+  return JSON.stringify(data.nodes.map(node => [
+    node.host,
+    Boolean(node.ssh),
+    node.mariadb,
+    node.cluster,
+    node.local_state,
+    node.size,
+  ]));
+}
+
+function structureSignatureFromDocument(root) {
+  return JSON.stringify(Array.from(root.querySelectorAll('.node-card')).map(card => [
+    card.dataset.host,
+    card.querySelector('[data-field="ssh"]')?.textContent.trim() === 'Activa',
+    card.querySelector('[data-field="mariadb"]')?.textContent.trim() || 'unknown',
+    card.querySelector('[data-field="cluster"]')?.textContent.trim() || 'N/A',
+    card.querySelector('[data-field="local_state"]')?.textContent.trim() || 'N/A',
+    card.querySelector('[data-field="size"]')?.textContent.trim() || 'N/A',
+  ]));
+}
+
+let currentStructureSignature = structureSignatureFromDocument(document);
+
+function syncFeedback(sourceDocument) {
+  dismissFeedback();
+  const source = sourceDocument.getElementById('action-feedback');
+  const banner = document.querySelector('.policy-banner');
+  if (source && banner) banner.insertAdjacentElement('afterend', document.importNode(source, true));
+}
+
+function showRequestError(message) {
+  dismissFeedback();
+  const feedback = document.createElement('section');
+  feedback.id = 'action-feedback';
+  feedback.className = 'feedback failure';
+  const title = document.createElement('strong');
+  title.textContent = 'No fue posible completar la operación.';
+  const detail = document.createElement('p');
+  detail.textContent = message;
+  feedback.append(title, detail);
+  document.querySelector('.policy-banner')?.insertAdjacentElement('afterend', feedback);
+}
+
+function applyDashboardDocument(sourceDocument, {updateFeedback = true} = {}) {
+  const sourceHero = sourceDocument.querySelector('.hero');
+  const targetHero = document.querySelector('.hero');
+  if (sourceHero && targetHero) {
+    targetHero.className = sourceHero.className;
+    for (const id of ['cluster-summary', 'ssh-count', 'maria-count', 'cluster-level']) {
+      const source = sourceDocument.getElementById(id);
+      const target = document.getElementById(id);
+      if (source && target) target.textContent = source.textContent;
+    }
+  }
+
+  for (const sourceCard of sourceDocument.querySelectorAll('.node-card')) {
+    const targetCard = document.querySelector(`.node-card[data-host="${CSS.escape(sourceCard.dataset.host)}"]`);
+    if (!targetCard) continue;
+    for (const field of ['ssh', 'mariadb', 'cluster', 'ready', 'local_state', 'size', 'connected', 'flow_control_paused', 'queues', 'status-label']) {
+      const source = sourceCard.querySelector(`[data-field="${field}"]`);
+      if (source) setText(targetCard, field, source.textContent.trim());
+    }
+    for (const field of ['node-status', 'dot', 'error']) {
+      const source = sourceCard.querySelector(`[data-field="${field}"]`);
+      const target = targetCard.querySelector(`[data-field="${field}"]`);
+      if (!source || !target) continue;
+      target.className = source.className;
+      if (field === 'dot') {
+        target.title = source.title;
+        target.setAttribute('aria-label', source.getAttribute('aria-label') || '');
+      } else if (field === 'error') {
+        target.textContent = source.textContent;
+      }
+    }
+    targetCard.classList.toggle('syncing', sourceCard.classList.contains('syncing'));
+    const sourceActions = sourceCard.querySelector('.actions');
+    const targetActions = targetCard.querySelector('.actions');
+    if (sourceActions && targetActions) targetActions.innerHTML = sourceActions.innerHTML;
+  }
+
+  const sourceRecovery = sourceDocument.getElementById('recovery-panel');
+  const targetRecovery = document.getElementById('recovery-panel');
+  if (sourceRecovery && targetRecovery) {
+    targetRecovery.replaceWith(document.importNode(sourceRecovery, true));
+  }
+  if (updateFeedback) syncFeedback(sourceDocument);
+  currentStructureSignature = structureSignatureFromDocument(document);
+  document.getElementById('last-refresh').textContent = `Última comprobación: ${new Date().toLocaleString()}`;
+}
+
+async function loadDashboardDocument(options) {
+  const response = await fetch('/', {cache: 'no-store'});
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const html = await response.text();
+  const sourceDocument = new DOMParser().parseFromString(html, 'text/html');
+  applyDashboardDocument(sourceDocument, options);
+}
+
+async function responseError(response) {
+  try {
+    const payload = await response.clone().json();
+    return payload.detail || `HTTP ${response.status}`;
+  } catch (_) {
+    return `HTTP ${response.status}`;
+  }
+}
+
+document.addEventListener('submit', async event => {
+  const form = event.target.closest('.async-dashboard-form');
+  if (!form || event.defaultPrevented) return;
+  event.preventDefault();
+  if (dashboardActionInProgress) return;
+
+  dashboardActionInProgress = true;
+  const nodeStart = form.classList.contains('start-node-form');
+  const lockedControls = nodeStart
+    ? Array.from(form.closest('.node-card')?.querySelectorAll('input, button') || [])
+    : [];
+  const previousDisabled = lockedControls.map(control => control.disabled);
+  const button = form.querySelector('button[type="submit"], button:not([type])');
+  const originalText = button?.textContent;
+  if (nodeStart) {
+    markNodeStarting(form);
+    lockedControls.forEach(control => { control.disabled = true; });
+  }
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Procesando...';
+  }
+
+  try {
+    const response = await fetch(form.action, {
+      method: form.method || 'POST',
+      body: new FormData(form),
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(await responseError(response));
+    const html = await response.text();
+    const sourceDocument = new DOMParser().parseFromString(html, 'text/html');
+    applyDashboardDocument(sourceDocument);
+  } catch (error) {
+    showRequestError(error.message);
+  } finally {
+    dashboardActionInProgress = false;
+    lockedControls.forEach((control, index) => {
+      if (control.isConnected) control.disabled = previousDisabled[index];
+    });
+    if (button?.isConnected) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+});
+
 async function refreshStatus() {
-  if (refreshInProgress) return;
+  if (refreshInProgress || dashboardActionInProgress) return;
   refreshInProgress = true;
   try {
     const response = await fetch('/api/status', {cache: 'no-store'});
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
 
-    // Si cambia el escenario funcional, recargar la página para reconstruir
-    // los controles manuales disponibles. La recarga no ejecuta acciones.
-    if (data.maria_up_count !== initialMariaUpCount ||
-        data.ssh_up_count !== initialSshUpCount ||
-        data.has_primary !== initialHasPrimary) {
-      window.location.reload();
-      return;
-    }
+    const structureChanged = structureSignatureFromData(data) !== currentStructureSignature;
 
     document.getElementById('cluster-summary').textContent = data.summary;
     document.getElementById('ssh-count').textContent = `${data.ssh_up_count}/${data.expected}`;
@@ -239,22 +451,7 @@ async function refreshStatus() {
       setText(card, 'connected', node.connected);
       setText(card, 'flow_control_paused', node.flow_control_paused);
       setText(card, 'queues', `${node.recv_queue} / ${node.send_queue}`);
-      const dot = card.querySelector('[data-field="dot"]');
-      if (dot) {
-        const dotState = !node.ssh ? 'bad' : (node.mariadb === 'active' ? 'ok' : 'degraded');
-        const dotLabel = !node.ssh
-          ? 'Sin conexión SSH'
-          : (node.mariadb === 'active' ? 'SSH y MariaDB activos' : 'SSH activo, MariaDB inactivo');
-        const statusLabel = !node.ssh
-          ? 'Nodo desconectado'
-          : (node.mariadb === 'active' ? 'Operativo' : 'MariaDB caído');
-        dot.className = `dot ${dotState}`;
-        dot.title = dotLabel;
-        dot.setAttribute('aria-label', dotLabel);
-        const nodeStatus = card.querySelector('[data-field="node-status"]');
-        if (nodeStatus) nodeStatus.className = `node-status ${dotState}`;
-        setText(card, 'status-label', statusLabel);
-      }
+      applyNodeVisualState(card, node);
       const error = card.querySelector('[data-field="error"]');
       if (error) {
         error.textContent = node.error || '';
@@ -262,6 +459,7 @@ async function refreshStatus() {
       }
     }
     document.getElementById('last-refresh').textContent = `Última comprobación: ${new Date().toLocaleString()}`;
+    if (structureChanged) await loadDashboardDocument({updateFeedback: false});
   } catch (err) {
     document.getElementById('last-refresh').textContent = `Error de monitoreo: ${err.message}`;
   } finally {

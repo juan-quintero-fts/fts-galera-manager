@@ -39,9 +39,9 @@ def dashboard_context(request: Request, positions=None, best=None, uuid_warning=
     nodes, level, summary = get_cluster_state()
     ssh_up = [n for n in nodes if n['ssh']]
     maria_up = [n for n in nodes if n['mariadb'] == 'active']
-    maria_down_accessible = [n for n in nodes if n['ssh'] and n['mariadb'] != 'active']
+    maria_down_accessible = [n for n in nodes if n['ssh'] and n['mariadb'] in ('inactive', 'failed')]
     primary_nodes = [n for n in maria_up if n['cluster'] == 'Primary']
-    all_mariadb_down = len(maria_up) == 0 and len(ssh_up) > 0
+    all_mariadb_down = len(ssh_up) > 0 and len(maria_down_accessible) == len(ssh_up)
     can_join_nodes = len(primary_nodes) > 0 and len(maria_down_accessible) > 0
 
     return ctx(
@@ -102,7 +102,7 @@ def analyze_recovery(request: Request, root_password: str = Form(...)):
 
     # El diagnóstico sólo aplica a nodos accesibles con MariaDB detenido.
     for n in nodes:
-        if n['ssh'] and n['mariadb'] != 'active':
+        if n['ssh'] and n['mariadb'] in ('inactive', 'failed'):
             try:
                 positions.append(recover_position(n['host'], root_password))
             except Exception as e:
@@ -145,12 +145,21 @@ def node_service(
     # Para incorporar un nodo detenido debe existir previamente un Primary activo.
     if action == 'start':
         current_nodes, _, _ = get_cluster_state()
+        target = next((n for n in current_nodes if n['host'] == host), None)
         has_primary = any(
             n['mariadb'] == 'active' and n['cluster'] == 'Primary'
             for n in current_nodes
         )
         if not has_primary:
             raise HTTPException(409, 'No se puede incorporar el nodo porque no existe un Primary activo. Use primero el flujo de recuperación del Dashboard.')
+        if not target or not target['ssh']:
+            raise HTTPException(409, 'El nodo no está accesible por SSH.')
+        if target['mariadb'] not in ('inactive', 'failed'):
+            raise HTTPException(
+                409,
+                f'No se puede iniciar el nodo porque MariaDB está en estado {target["mariadb"]}. '
+                'Espere a que termine el inicio o la sincronización.',
+            )
 
     ok, detail = service_action(host, action, root_password)
 
@@ -162,7 +171,9 @@ def node_service(
         f'Cluster={after["cluster"]}, Ready={after["ready"]}, '
         f'Connected={after["connected"]}, State={after["local_state"]}, Size={after["size"]}'
     )
-    action_ok = ok and after['mariadb'] == 'active'
+    # --no-block confirma que systemd aceptó el inicio. La sincronización y el
+    # estado Synced se validan después mediante las consultas periódicas.
+    action_ok = ok
     log(actor, host, f'mariadb:{action}', action_ok, detail)
 
     query = urlencode({'event': action, 'host': host, 'ok': '1' if action_ok else '0'})
@@ -187,8 +198,16 @@ def do_bootstrap(
     target = next((n for n in current_nodes if n['host'] == host), None)
     if not target or not target['ssh']:
         raise HTTPException(409, 'El nodo seleccionado no está accesible por SSH.')
-    if any(n['mariadb'] == 'active' for n in current_nodes):
-        raise HTTPException(409, 'Existe al menos un MariaDB activo. El bootstrap se bloquea para evitar crear un Primary mientras hay otro servicio activo.')
+    nodes_not_stopped = [
+        n for n in current_nodes
+        if n['ssh'] and n['mariadb'] not in ('inactive', 'failed')
+    ]
+    if nodes_not_stopped:
+        raise HTTPException(
+            409,
+            'El bootstrap se bloquea porque existe al menos un MariaDB activo, '
+            'iniciando o sincronizando.',
+        )
 
     # Sólo bootstrap manual. Nunca se llama desde monitoreo ni en segundo plano.
     ok, detail = bootstrap(host, root_password)
