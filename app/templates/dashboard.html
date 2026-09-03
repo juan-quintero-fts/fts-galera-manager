@@ -388,6 +388,7 @@ document.addEventListener('submit', async event => {
   const previousDisabled = lockedControls.map(control => control.disabled);
   const button = form.querySelector('button[type="submit"], button:not([type])');
   const originalText = button?.textContent;
+  let requestFailed = false;
   if (nodeStart) {
     markNodeStarting(form);
     lockedControls.forEach(control => { control.disabled = true; });
@@ -398,7 +399,8 @@ document.addEventListener('submit', async event => {
   }
 
   try {
-    const response = await fetch(form.action, {
+    const actionUrl = new URL(form.getAttribute('action'), window.location.href);
+    const response = await fetch(actionUrl, {
       method: form.method || 'POST',
       body: new FormData(form),
       cache: 'no-store',
@@ -408,6 +410,7 @@ document.addEventListener('submit', async event => {
     const sourceDocument = new DOMParser().parseFromString(html, 'text/html');
     applyDashboardDocument(sourceDocument);
   } catch (error) {
+    requestFailed = true;
     showRequestError(error.message);
   } finally {
     dashboardActionInProgress = false;
@@ -419,6 +422,7 @@ document.addEventListener('submit', async event => {
       button.textContent = originalText;
     }
   }
+  if (requestFailed) await refreshStatus();
 });
 
 async function refreshStatus() {
