@@ -5,39 +5,14 @@ from fastapi.templating import Jinja2Templates
 from urllib.parse import urlencode
 import markdown
 import re
-import threading
 
 from .core import settings, inspect_node, classify, recover_position, service_action, bootstrap, SSHAuthenticationError
-from .audit import log, recent, recent_alerts, init_db
-from .alerts import notify_node_transitions
+from .audit import log, recent, init_db
 
 app = FastAPI(title=settings.app_name)
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 templates = Jinja2Templates(directory='app/templates')
 init_db()
-alert_monitor_stop = threading.Event()
-
-
-def alert_monitor_loop():
-    """Monitoreo independiente de la pantalla; sólo genera notificaciones."""
-    while not alert_monitor_stop.is_set():
-        try:
-            nodes, _, _ = get_cluster_state()
-            notify_node_transitions(nodes)
-        except Exception as exc:
-            log('monitor', 'cluster', 'alert:monitor', False, f'Error al evaluar alertas: {exc}')
-        alert_monitor_stop.wait(settings.monitor_interval)
-
-
-@app.on_event('startup')
-def start_alert_monitor():
-    if settings.email_alerts_enabled:
-        threading.Thread(target=alert_monitor_loop, name='email-alert-monitor', daemon=True).start()
-
-
-@app.on_event('shutdown')
-def stop_alert_monitor():
-    alert_monitor_stop.set()
 
 
 def ctx(request, **extra):
@@ -277,11 +252,6 @@ def do_bootstrap(
 @app.get('/audit', response_class=HTMLResponse)
 def audit(request: Request):
     return templates.TemplateResponse('audit.html', ctx(request, rows=recent()))
-
-
-@app.get('/alerts', response_class=HTMLResponse)
-def alerts(request: Request):
-    return templates.TemplateResponse('alerts.html', ctx(request, alerts=recent_alerts()))
 
 
 @app.get('/help', response_class=HTMLResponse)
