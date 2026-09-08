@@ -38,6 +38,20 @@ def recent(limit=100):
         for row in rows
     ]
 
+def recent_alerts(limit=100):
+    """Alertas de correo, separadas del historial de operaciones manuales."""
+    init_db()
+    with sqlite3.connect(DB) as c:
+        c.row_factory = sqlite3.Row
+        rows = c.execute(
+            "SELECT * FROM audit WHERE action IN ('alert:node-down', 'alert:node-recovered') ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [
+        {**dict(row), 'detail': sanitize_detail(row['detail'])}
+        for row in rows
+    ]
+
 def update_node_alert_state(host, online):
     """Guarda el último estado y devuelve el anterior, si ya existía."""
     init_db()

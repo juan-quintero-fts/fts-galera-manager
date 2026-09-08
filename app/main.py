@@ -8,7 +8,7 @@ import re
 import threading
 
 from .core import settings, inspect_node, classify, recover_position, service_action, bootstrap, SSHAuthenticationError
-from .audit import log, recent, init_db
+from .audit import log, recent, recent_alerts, init_db
 from .alerts import notify_node_transitions
 
 app = FastAPI(title=settings.app_name)
@@ -277,6 +277,11 @@ def do_bootstrap(
 @app.get('/audit', response_class=HTMLResponse)
 def audit(request: Request):
     return templates.TemplateResponse('audit.html', ctx(request, rows=recent()))
+
+
+@app.get('/alerts', response_class=HTMLResponse)
+def alerts(request: Request):
+    return templates.TemplateResponse('alerts.html', ctx(request, alerts=recent_alerts()))
 
 
 @app.get('/help', response_class=HTMLResponse)
