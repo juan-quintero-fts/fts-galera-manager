@@ -36,6 +36,17 @@ El instalador usa Podman puro (`podman build` y `podman run`) y `vim` para edita
 
 La contraseña root de Linux nunca se almacena.
 
+## Alertas por correo
+
+Configura `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `ALERT_EMAIL_FROM` y `ALERT_EMAIL_TO` en `.env`. Para varios destinatarios, separa sus correos por coma en `ALERT_EMAIL_TO`.
+
+Con SMTP configurado, el servidor consulta los nodos cada `MONITOR_INTERVAL` segundos y envía un correo sólo cuando un nodo cambia de estado:
+
+- **Caído:** SSH no está accesible o MariaDB no está activo.
+- **Recuperado:** SSH vuelve a estar accesible y MariaDB está activo.
+
+El primer sondeo sólo establece la línea base y no envía alertas. Las notificaciones son informativas; no ejecutan acciones correctivas.
+
 ## Ayuda
 
 La documentación visible desde el panel **Ayuda** se encuentra en:

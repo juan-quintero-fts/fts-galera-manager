@@ -5,14 +5,39 @@ from fastapi.templating import Jinja2Templates
 from urllib.parse import urlencode
 import markdown
 import re
+import threading
 
-from .core import settings, inspect_node, classify, recover_position, service_action, bootstrap
+from .core import settings, inspect_node, classify, recover_position, service_action, bootstrap, SSHAuthenticationError
 from .audit import log, recent, init_db
+from .alerts import notify_node_transitions
 
 app = FastAPI(title=settings.app_name)
 app.mount('/static', StaticFiles(directory='app/static'), name='static')
 templates = Jinja2Templates(directory='app/templates')
 init_db()
+alert_monitor_stop = threading.Event()
+
+
+def alert_monitor_loop():
+    """Monitoreo independiente de la pantalla; sólo genera notificaciones."""
+    while not alert_monitor_stop.is_set():
+        try:
+            nodes, _, _ = get_cluster_state()
+            notify_node_transitions(nodes)
+        except Exception as exc:
+            log('monitor', 'cluster', 'alert:monitor', False, f'Error al evaluar alertas: {exc}')
+        alert_monitor_stop.wait(settings.monitor_interval)
+
+
+@app.on_event('startup')
+def start_alert_monitor():
+    if settings.email_alerts_enabled:
+        threading.Thread(target=alert_monitor_loop, name='email-alert-monitor', daemon=True).start()
+
+
+@app.on_event('shutdown')
+def stop_alert_monitor():
+    alert_monitor_stop.set()
 
 
 def ctx(request, **extra):
@@ -105,6 +130,11 @@ def analyze_recovery(request: Request, root_password: str = Form(...)):
         if n['ssh'] and n['mariadb'] in ('inactive', 'failed'):
             try:
                 positions.append(recover_position(n['host'], root_password))
+            except SSHAuthenticationError:
+                positions.append({
+                    'host': n['host'], 'hostname': 'N/A', 'uuid': 'N/A',
+                    'seqno': 'N/A', 'source': 'Autenticación SSH rechazada. Verifica la contraseña de root.'
+                })
             except Exception as e:
                 positions.append({
                     'host': n['host'], 'hostname': 'N/A', 'uuid': 'N/A',
@@ -161,7 +191,12 @@ def node_service(
                 'Espere a que termine el inicio o la sincronización.',
             )
 
-    ok, detail = service_action(host, action, root_password)
+    try:
+        ok, detail = service_action(host, action, root_password)
+    except SSHAuthenticationError:
+        log(actor, host, f'mariadb:{action}', False, 'Autenticación SSH rechazada.')
+        query = urlencode({'event': 'auth_failed', 'host': host, 'ok': '0'})
+        return RedirectResponse(f'/?{query}', status_code=303)
 
     # Validación posterior de estado. No ejecuta ninguna acción adicional.
     after = inspect_node(host)
@@ -210,7 +245,12 @@ def do_bootstrap(
         )
 
     # Sólo bootstrap manual. Nunca se llama desde monitoreo ni en segundo plano.
-    ok, detail = bootstrap(host, root_password)
+    try:
+        ok, detail = bootstrap(host, root_password)
+    except SSHAuthenticationError:
+        log(actor, host, 'galera:bootstrap', False, 'Autenticación SSH rechazada.')
+        query = urlencode({'event': 'auth_failed', 'host': host, 'ok': '0'})
+        return RedirectResponse(f'/?{query}', status_code=303)
 
     # Validar que el nodo quedó realmente como Primary y listo para operar.
     after = inspect_node(host)

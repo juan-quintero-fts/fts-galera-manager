@@ -5,6 +5,16 @@
 </section>
 
 {% if feedback %}
+{% if feedback.event == 'auth_failed' %}
+<div class="modal-backdrop" id="auth-modal" role="presentation">
+<section class="feedback failure modal-dialog" id="action-feedback" role="alertdialog" aria-modal="true" aria-labelledby="auth-modal-title">
+  <h2 id="auth-modal-title">Contraseña rechazada</h2>
+  <p>La contraseña de root no fue aceptada para <code>{{ feedback.host }}</code>.</p>
+  <p>No se ejecutó ninguna acción. Verifica la contraseña e inténtalo nuevamente.</p>
+  <button type="button" onclick="dismissFeedback()">Entendido</button>
+</section>
+</div>
+{% else %}
 <section class="feedback {{ 'success' if feedback.ok else 'failure' }}" id="action-feedback">
   {% if feedback.event == 'bootstrap' %}
     <strong>{{ 'Primary levantado y validado correctamente.' if feedback.ok else 'El bootstrap terminó, pero la validación posterior no confirmó un Primary saludable.' }}</strong>
@@ -21,6 +31,7 @@
     <p>Nodo: <code>{{ feedback.host }}</code>. El indicador permanecerá en <strong>Sincronizando</strong> hasta que Galera confirme el estado Synced.</p>
   {% endif %}
 </section>
+{% endif %}
 {% endif %}
 
 <section class="hero {{ level }}">
@@ -39,6 +50,29 @@
   </div>
 </section>
 
+<section class="metrics" aria-label="Resumen del clúster">
+  <article class="metric-card">
+    <div class="metric-top"><span>Interfaces SSH</span><span class="metric-icon green">✓</span></div>
+    <div class="metric-value"><span id="metric-ssh">{{ ssh_up_count }}</span> <small>/ {{ expected }}</small></div>
+    <div class="metric-footer">Interfaces accesibles</div>
+  </article>
+  <article class="metric-card">
+    <div class="metric-top"><span>MariaDB activos</span><span class="metric-icon blue">◉</span></div>
+    <div class="metric-value"><span id="metric-mariadb">{{ maria_up_count }}</span> <small>/ {{ expected }}</small></div>
+    <div class="metric-footer">Servicios ejecutándose</div>
+  </article>
+  <article class="metric-card">
+    <div class="metric-top"><span>Nodos sincronizados</span><span class="metric-icon purple">↗</span></div>
+    <div class="metric-value"><span id="metric-synced">{{ nodes|selectattr('local_state', 'equalto', 'Synced')|list|length }}</span> <small>/ {{ expected }}</small></div>
+    <div class="metric-footer">Estado Galera Synced</div>
+  </article>
+  <article class="metric-card">
+    <div class="metric-top"><span>Cluster size esperado</span><span class="metric-icon orange">▣</span></div>
+    <div class="metric-value" id="metric-cluster-size">{{ expected }}</div>
+    <div class="metric-footer">Tamaño configurado del clúster</div>
+  </article>
+</section>
+
 <section class="section-title">
   <div>
     <h2>Estado de nodos</h2>
@@ -50,7 +84,7 @@
 {% for n in nodes %}
 {% set operational = n.mariadb == 'active' and n.local_state == 'Synced' and n.ready in ('ON', '1') and n.connected in ('ON', '1') %}
 {% set syncing = n.syncing %}
-<article class="card node-card {{ 'syncing' if syncing else '' }}" data-host="{{ n.host }}">
+<article class="card node-card state-{{ 'bad' if not n.ssh else ('ok' if operational else 'degraded') }} {{ 'syncing' if syncing else '' }}" data-host="{{ n.host }}">
   <div class="card-head">
     <h2>{{ n.host }}</h2>
     {% set dot_state = 'bad' if not n.ssh else ('ok' if operational else 'degraded') %}
@@ -63,7 +97,7 @@
   </div>
   <dl>
     <dt>Interfaz / SSH</dt><dd data-field="ssh">{{ 'Activa' if n.ssh else 'Inactiva' }}</dd>
-    <dt>MariaDB</dt><dd data-field="mariadb">{{ n.mariadb }}</dd>
+    <dt>MariaDB</dt><dd data-field="mariadb" class="service-state {{ 'is-active' if n.mariadb == 'active' else 'is-inactive' }}" style="color: {{ 'var(--success)' if n.mariadb == 'active' else 'var(--danger)' }}">{{ n.mariadb }}</dd>
     <dt>Cluster</dt><dd data-field="cluster">{{ n.cluster }}</dd>
     <dt>Ready</dt><dd data-field="ready">{{ n.ready }}</dd>
     <dt>Estado local</dt><dd data-field="local_state">{{ n.local_state }}</dd>
@@ -178,6 +212,15 @@
   </div>
   {% endif %}
 </section>
+<style>
+  .node-card.state-degraded:before { background: var(--warning); }
+  .node-card.state-bad:before { background: var(--danger); }
+  .modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(15, 23, 42, .54); }
+  .modal-dialog { width: min(100%, 430px); margin: 0; padding: 24px; border: 0; border-radius: 16px; box-shadow: 0 24px 70px rgba(15, 23, 42, .35); }
+  .modal-dialog h2 { margin: 0 0 10px; font-size: 18px; }
+  .modal-dialog p { margin: 7px 0; line-height: 1.5; }
+  .modal-dialog button { margin-top: 16px; }
+</style>
 {% endblock %}
 
 {% block scripts %}
@@ -190,6 +233,31 @@ let dashboardActionInProgress = false;
 function setText(card, field, value) {
   const el = card.querySelector(`[data-field="${field}"]`);
   if (el) el.textContent = value ?? 'N/A';
+}
+
+function setRefreshTime(text = `Última comprobación: ${new Date().toLocaleString()}`) {
+  const lastRefresh = document.getElementById('last-refresh');
+  const topbarRefresh = document.getElementById('topbar-refresh');
+  if (lastRefresh) lastRefresh.textContent = text;
+  if (topbarRefresh) topbarRefresh.textContent = text.replace('Última comprobación: ', '');
+}
+
+function setMariaDBState(card, state) {
+  const el = card.querySelector('[data-field="mariadb"]');
+  if (!el) return;
+  el.classList.remove('is-active', 'is-inactive', 'is-transitioning');
+  el.classList.add(state === 'active' ? 'is-active' :
+    ['activating', 'reloading'].includes(state) ? 'is-transitioning' : 'is-inactive');
+  el.style.color = state === 'active' ? 'var(--success)' :
+    ['activating', 'reloading'].includes(state) ? 'var(--warning)' : 'var(--danger)';
+}
+
+function updateMetrics(data) {
+  const synced = data.nodes.filter(node => node.local_state === 'Synced').length;
+  document.getElementById('metric-ssh').textContent = data.ssh_up_count;
+  document.getElementById('metric-mariadb').textContent = data.maria_up_count;
+  document.getElementById('metric-synced').textContent = synced;
+  document.getElementById('metric-cluster-size').textContent = data.expected;
 }
 
 function nodeVisualState(node) {
@@ -226,6 +294,8 @@ function applyNodeVisualState(card, node) {
   if (nodeStatus) nodeStatus.className = `node-status ${visual.css}`;
   setText(card, 'status-label', visual.label);
   card.classList.toggle('syncing', visual.syncing);
+  card.classList.remove('state-ok', 'state-degraded', 'state-bad');
+  card.classList.add(`state-${visual.css}`);
 }
 
 function markNodeStarting(form) {
@@ -240,6 +310,7 @@ function markNodeStarting(form) {
     syncing: true,
   });
   setText(card, 'mariadb', 'activating');
+  setMariaDBState(card, 'activating');
   const error = card.querySelector('[data-field="error"]');
   if (error) {
     error.textContent = '';
@@ -262,6 +333,11 @@ function showRemainingNodes() {
 }
 
 function dismissFeedback() {
+  const modal = document.getElementById('auth-modal');
+  if (modal) {
+    modal.remove();
+    return;
+  }
   const el = document.getElementById('action-feedback');
   if (el) el.remove();
 }
@@ -292,6 +368,11 @@ let currentStructureSignature = structureSignatureFromDocument(document);
 
 function syncFeedback(sourceDocument) {
   dismissFeedback();
+  const sourceModal = sourceDocument.getElementById('auth-modal');
+  if (sourceModal) {
+    document.body.append(document.importNode(sourceModal, true));
+    return;
+  }
   const source = sourceDocument.getElementById('action-feedback');
   const banner = document.querySelector('.policy-banner');
   if (source && banner) banner.insertAdjacentElement('afterend', document.importNode(source, true));
@@ -329,6 +410,7 @@ function applyDashboardDocument(sourceDocument, {updateFeedback = true} = {}) {
       const source = sourceCard.querySelector(`[data-field="${field}"]`);
       if (source) setText(targetCard, field, source.textContent.trim());
     }
+    setMariaDBState(targetCard, sourceCard.querySelector('[data-field="mariadb"]')?.textContent.trim());
     for (const field of ['node-status', 'dot', 'error']) {
       const source = sourceCard.querySelector(`[data-field="${field}"]`);
       const target = targetCard.querySelector(`[data-field="${field}"]`);
@@ -342,6 +424,10 @@ function applyDashboardDocument(sourceDocument, {updateFeedback = true} = {}) {
       }
     }
     targetCard.classList.toggle('syncing', sourceCard.classList.contains('syncing'));
+    targetCard.classList.remove('state-ok', 'state-degraded', 'state-bad');
+    for (const state of ['ok', 'degraded', 'bad']) {
+      if (sourceCard.classList.contains(`state-${state}`)) targetCard.classList.add(`state-${state}`);
+    }
     const sourceActions = sourceCard.querySelector('.actions');
     const targetActions = targetCard.querySelector('.actions');
     if (sourceActions && targetActions) targetActions.innerHTML = sourceActions.innerHTML;
@@ -354,7 +440,7 @@ function applyDashboardDocument(sourceDocument, {updateFeedback = true} = {}) {
   }
   if (updateFeedback) syncFeedback(sourceDocument);
   currentStructureSignature = structureSignatureFromDocument(document);
-  document.getElementById('last-refresh').textContent = `Última comprobación: ${new Date().toLocaleString()}`;
+  setRefreshTime();
 }
 
 async function loadDashboardDocument(options) {
@@ -446,12 +532,14 @@ async function refreshStatus() {
     level.textContent = data.level;
     const hero = document.querySelector('.hero');
     hero.className = `hero ${data.level}`;
+    updateMetrics(data);
 
     for (const node of data.nodes) {
       const card = document.querySelector(`[data-host="${node.host}"]`);
       if (!card) continue;
       setText(card, 'ssh', node.ssh ? 'Activa' : 'Inactiva');
       setText(card, 'mariadb', node.mariadb);
+      setMariaDBState(card, node.mariadb);
       setText(card, 'cluster', node.cluster);
       setText(card, 'ready', node.ready);
       setText(card, 'local_state', node.local_state);
@@ -466,10 +554,10 @@ async function refreshStatus() {
         error.classList.toggle('hidden', !node.error);
       }
     }
-    document.getElementById('last-refresh').textContent = `Última comprobación: ${new Date().toLocaleString()}`;
+    setRefreshTime();
     if (structureChanged) await loadDashboardDocument({updateFeedback: false});
   } catch (err) {
-    document.getElementById('last-refresh').textContent = `Error de monitoreo: ${err.message}`;
+    setRefreshTime(`Error de monitoreo: ${err.message}`);
   } finally {
     refreshInProgress = false;
   }

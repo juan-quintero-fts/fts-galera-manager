@@ -20,6 +20,21 @@ class Settings:
     expected_cluster_size: int = int(os.getenv('EXPECTED_CLUSTER_SIZE', '3'))
     monitor_interval: int = max(5, int(os.getenv('MONITOR_INTERVAL', '10')))
     auto_monitor: bool = os.getenv('AUTO_MONITOR', 'true').strip().lower() in {'1','true','yes','on'}
+    # Alertas por correo. Se activan sólo si SMTP_HOST, ALERT_EMAIL_FROM y ALERT_EMAIL_TO están configurados.
+    smtp_host: str = os.getenv('SMTP_HOST', '').strip()
+    smtp_port: int = int(os.getenv('SMTP_PORT', '587'))
+    smtp_user: str = os.getenv('SMTP_USER', '').strip()
+    smtp_password: str = os.getenv('SMTP_PASSWORD', '')
+    smtp_starttls: bool = os.getenv('SMTP_STARTTLS', 'true').strip().lower() in {'1','true','yes','on'}
+    smtp_ssl: bool = os.getenv('SMTP_SSL', 'false').strip().lower() in {'1','true','yes','on'}
+    alert_email_from: str = os.getenv('ALERT_EMAIL_FROM', '').strip()
+    alert_email_to: tuple[str, ...] = tuple(
+        address.strip() for address in os.getenv('ALERT_EMAIL_TO', '').split(',') if address.strip()
+    )
+
+    @property
+    def email_alerts_enabled(self):
+        return bool(self.smtp_host and self.alert_email_from and self.alert_email_to)
 
     @property
     def nodes(self):
@@ -28,6 +43,10 @@ class Settings:
 settings = Settings()
 
 class SSHError(RuntimeError):
+    pass
+
+class SSHAuthenticationError(SSHError):
+    """La conexión SSH alcanzó el nodo, pero rechazó las credenciales."""
     pass
 
 class Remote:
@@ -68,6 +87,10 @@ class Remote:
             kwargs['key_filename'] = settings.ssh_key_path
         try:
             c.connect(**kwargs)
+        except paramiko.AuthenticationException as e:
+            raise SSHAuthenticationError(
+                f'Autenticación SSH rechazada para {self.user} en {self.host}.'
+            ) from e
         except Exception as e:
             raise SSHError(f'No fue posible autenticar SSH como {self.user} en {self.host}: {e}')
         self.client = c

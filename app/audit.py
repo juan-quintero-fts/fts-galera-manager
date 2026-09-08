@@ -20,6 +20,7 @@ def init_db():
     os.makedirs(os.path.dirname(DB), exist_ok=True)
     with sqlite3.connect(DB) as c:
         c.execute('''CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, actor TEXT, host TEXT, action TEXT, ok INTEGER, detail TEXT)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS node_alert_state(host TEXT PRIMARY KEY, online INTEGER NOT NULL, updated_at TEXT NOT NULL)''')
 
 def log(actor, host, action, ok, detail=''):
     init_db()
@@ -36,3 +37,17 @@ def recent(limit=100):
         {**dict(row), 'detail': sanitize_detail(row['detail'])}
         for row in rows
     ]
+
+def update_node_alert_state(host, online):
+    """Guarda el último estado y devuelve el anterior, si ya existía."""
+    init_db()
+    now = datetime.datetime.now().isoformat(timespec='seconds')
+    with sqlite3.connect(DB) as c:
+        row = c.execute('SELECT online FROM node_alert_state WHERE host = ?', (host,)).fetchone()
+        previous = None if row is None else bool(row[0])
+        c.execute(
+            '''INSERT INTO node_alert_state(host, online, updated_at) VALUES(?,?,?)
+               ON CONFLICT(host) DO UPDATE SET online=excluded.online, updated_at=excluded.updated_at''',
+            (host, 1 if online else 0, now),
+        )
+    return previous
